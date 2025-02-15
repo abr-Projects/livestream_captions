@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Stream with Subtitles</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            background-color: #f4f4f4;
+        }
+        video {
+            width: 80%;
+            max-height: 60%;
+            border: none;
+        }
+        #subtitles {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: white;
+            border: 1px solid #ccc;
+            width: 80%;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        .highlight {
+            background-color: yellow;
+        }
+        .form-container {
+            margin-bottom: 20px;
+        }
+        .form-container input, .form-container select, .form-container button {
+            margin: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Live Stream with Subtitles</h1>
+    <div class="form-container">
+        <input type="text" id="streamUrl" placeholder="Enter livestream URL" required>
+        <select id="language">
+            <option value="en">English</option>
+            <option value="es">Spanish</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="it">Italian</option>
+            <option value="pt">Portuguese</option>
+            <option value="nl">Dutch</option>
+            <option value="ru">Russian</option>
+            <option value="ja">Japanese</option>
+            <option value="auto">Auto Detect</option>
+            <!-- Refer to language codes in whisper tokenizer.py -->
+        </select>
+        <select id="translation">
+            <option value="none">No Translation</option>
+            <option value="en">Translate to English</option>
+            <option value="es">Translate to Spanish</option>
+            <option value="fr">Translate to French</option>
+            <!-- Refer to language codes in whisper tokenizer.py -->
+        </select>
+        <input type="number" id="chunkLength" placeholder="Chunk Length (seconds)" value="30" required>
+        <input type="number" id="bufferedChunks" placeholder="buffer chunks" value="2" required>
+        <button id="startStream">Start Stream</button>
+    </div>
+    <div class="info"><strong>Video Time:</strong> <span id="videoTime">00:00:00</span></div>
+    <div class="info"><strong>Chunk Number:</strong> <span id="chunkNumber">N/A</span></div>
+    <video id="liveStream" autoplay></video>
+    <div id="subtitles">Subtitles will appear here...</div>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        const video = document.getElementById("liveStream");
+        const subtitlesDiv = document.getElementById("subtitles");
+        const videoTimeLabel = document.getElementById("videoTime");
+        const chunkNumberLabel = document.getElementById("chunkNumber");
+        const mimeCodec = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
+        let mediaSource = null;
+        let sourceBuffer = null;
+        let chunkQueue = [];
+        let isAppending = false;
+        let userPaused = false;
+        let lastSubtitleTime = 0;
+        let subtitleSegments = [];
+        let lastChunkIndex = "N/A";
+        let subtitleTimeout = null;
+        let isPlaybackStarted = false;
+
+        document.getElementById("startStream").addEventListener("click", () => {
+            const streamUrl = document.getElementById("streamUrl").value;
+            const language = document.getElementById("language").value;
+            const translation = document.getElementById("translation").value;
+            const chunkLength = document.getElementById("chunkLength").value;
+            const MIN_BUFFERED_CHUNKS = parseInt(document.getElementById("bufferedChunks").value);
+            console.log(MIN_BUFFERED_CHUNKS);
+            socket.emit("start_stream", { streamUrl, language, translation, chunkLength });
+        });
+
+        function loadVideo() {
+            if (MediaSource.isTypeSupported(mimeCodec)) {
+                mediaSource = new MediaSource();
+                video.src = URL.createObjectURL(mediaSource);
+                mediaSource.addEventListener("sourceopen", sourceOpen);
+            } else {
+                console.error("Unsupported MIME type or codec: ", mimeCodec);
+            }
+        }
+
+        async function sourceOpen() {
+            if (!sourceBuffer) {
+                sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
+                sourceBuffer.mode = "sequence";
+            }
+            sourceBuffer.addEventListener("updateend", () => {
+                isAppending = false;
+                processChunkQueue();
+            });
+            sourceBuffer.addEventListener("error", (e) => {
+                console.error("SourceBuffer error:", e);
+                isAppending = false;
+                processChunkQueue();
+            });
+        }
+
+        function appendVideoChunk(chunkIndex) {
+            chunkQueue.push(chunkIndex);
+            processChunkQueue();
+        }
+
+        function processChunkQueue() {
+            const MIN_BUFFERED_CHUNKS = parseInt(document.getElementById("bufferedChunks").value);
+            if (isAppending || chunkQueue.length === 0 || !sourceBuffer) {
+                return;
+            }
+            console.log(MIN_BUFFERED_CHUNKS);   
+            if (!isPlaybackStarted && chunkQueue.length < MIN_BUFFERED_CHUNKS) {
+                console.log("Waiting for more chunks to buffer...");
+                return;
+            }
+
+            isAppending = true;
+
+            const chunkIndex = chunkQueue.shift();
+            fetch(`/chunks/chunk_${chunkIndex}.mp4`)
+                .then(response => response.arrayBuffer())
+                .then(data => {
+                    sourceBuffer.appendBuffer(data);
+                    lastChunkIndex = chunkIndex;
+                    chunkNumberLabel.textContent = chunkIndex;
+                    if (!isPlaybackStarted) {
+                        isPlaybackStarted = true;
+                        video.play().catch(error => {
+                            console.error("Error starting playback:", error);
+                        });
+                    }
+                })
+                .catch(error => {
+                    console.error("Error fetching video chunk:", error);
+                    chunkQueue.unshift(chunkIndex); 
+                    isAppending = false;
+            });
+        }
+
+        socket.on("transcript_update", (data) => {
+            appendVideoChunk(data.chunk_index);
+
+            subtitleSegments.push(
+                ...data.segments.map(segment => ({
+                    startTime: segment[0] + data.chunk_index * data.chunk_length,
+                    endTime: segment[1] + data.chunk_index * data.chunk_length,
+                    text: segment[2]
+                }))
+            );
+
+            subtitleSegments.sort((a, b) => a.startTime - b.startTime);
+        });
+
+        function formatTime(seconds) {
+            const h = Math.floor(seconds / 3600).toString().padStart(2, "0");
+            const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, "0");
+            const s = Math.floor(seconds % 60).toString().padStart(2, "0");
+            return `${h}:${m}:${s}`;
+        }
+
+        function updateSubtitles() {
+            const currentTime = video.currentTime;
+            videoTimeLabel.textContent = formatTime(currentTime); 
+
+            const activeSubtitle = subtitleSegments.find(segment =>
+                currentTime >= segment.startTime && currentTime <= segment.endTime
+            );
+
+            if (activeSubtitle) {
+                if (lastSubtitleTime !== activeSubtitle.startTime) {
+                    clearTimeout(subtitleTimeout); 
+                    subtitleTimeout = setTimeout(() => {
+                        subtitlesDiv.innerHTML = `[${formatTime(activeSubtitle.startTime)} - ${formatTime(activeSubtitle.endTime)}] ${activeSubtitle.text}`;
+                    }, 500); 
+                    lastSubtitleTime = activeSubtitle.startTime;
+                }
+            } else {
+                setTimeout(() => {
+                    if (!subtitleSegments.some(segment => video.currentTime >= segment.startTime && video.currentTime <= segment.endTime)) {
+                        subtitlesDiv.innerHTML = " ";
+                    }
+                }, 500);
+            }
+        }
+
+        video.addEventListener('timeupdate', updateSubtitles);
+
+        video.addEventListener('click', () => {
+            if (video.paused) {
+                userPaused = false;
+                video.play();
+            } else {
+                userPaused = true;
+                video.pause();
+            }
+        });
+
+        video.addEventListener('pause', () => {
+            if (video.paused && !userPaused) {
+                video.play();
+            }
+        });
+
+        window.onload = loadVideo;
+    </script>
+</body>
+</html>
