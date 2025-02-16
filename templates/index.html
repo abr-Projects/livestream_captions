@@ -98,7 +98,6 @@
             const translation = document.getElementById("translation").value;
             const chunkLength = document.getElementById("chunkLength").value;
             const MIN_BUFFERED_CHUNKS = parseInt(document.getElementById("bufferedChunks").value);
-            console.log(MIN_BUFFERED_CHUNKS);
             socket.emit("start_stream", { streamUrl, language, translation, chunkLength });
         });
 
