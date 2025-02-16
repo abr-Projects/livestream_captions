@@ -19,7 +19,7 @@ class FasterWhisperASR:
         segments, _ = self.model.transcribe(
             audio,
             language=self.original_language,
-            beam_size=0,
+            beam_size=1,
             word_timestamps=False,
             condition_on_previous_text=True,
             task=task
